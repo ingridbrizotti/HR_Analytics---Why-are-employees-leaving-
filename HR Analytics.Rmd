@@ -1,0 +1,414 @@
+---
+title: "HR Analytics - Why are employees leaving?"
+output: pdf_document
+author: Ingrid Brizotti
+---
+
+The goal of this study is to investigate the causes that make employees leave their jobs. 
+Also compare logistic regression and decision tree to solve this puzzle.
+
+\hspace*{1cm}
+
+**Dataset:** Kaggle (https://www.kaggle.com/ludobenistant/hr-analytics)
+
+**Approach:** find out what are the most relevant characteristics that make employees leave the company
+
+**Techniques used:** Logistic regression and decision tree
+
+**Keywords**: logistic regression, decision tree, supervised machine learning, HR analytics 
+
+
+\hspace*{2cm}
+**Steps:**
+
+**1)** Prepare the data
+
+**2)** Exploratory analysis
+
+**3)** Data transformation
+
+**4)** Divide between train and test set
+
+**5)** Logistic regression
+
+**6)** Decision tree
+
+**7)** Conclusions:
+
+* What are the most important aspects that are decisive to employees leave their jobs?
+
+* What is more accurate to predict these aspects: logistic regression or decision tree?
+
+\hspace*{2cm}
+
+**1) Prepare the data**
+
+```{r}
+library(ggplot2)
+library(scales)
+library(gmodels) #logistic regression
+library(rpart) #decision tree
+#vizualise tree
+#library(rattle) 
+#library(rpart.plot)
+#library(RColorBrewer)
+library(ROCR)
+library(rafalib)
+
+# Load the data
+setwd("/Users/ingridbrizotti/Desktop/GitHub/HR_Analytics_Kaggle/")
+
+hr = read.csv("HR_comma_sep.csv")
+dim(hr)
+# [1] 14999    10
+
+attach(hr)
+
+summary(hr)
+
+# Checking missing in all variables
+propmiss <- function(dataframe) {
+  m <- sapply(dataframe, function(x) {
+    data.frame(
+      nmiss=sum(is.na(x)),  # number of missing
+      n=length(x),
+      propmiss=sum(is.na(x))/length(x) # proportion of missing inside the variable
+    )
+  })
+  d <- data.frame(t(m))
+  d <- sapply(d, unlist)
+  d <- as.data.frame(d)
+  d$variable <- row.names(d)
+  row.names(d) <- NULL
+  d <- cbind(d[ncol(d)],d[-ncol(d)])
+  return(d[order(d$propmiss), ])
+}
+propmiss(hr)
+
+```
+
+The data has no missing values.
+
+\hspace*{2cm}
+
+**2) Exploratory analysis**
+
+```{r}
+str(hr)
+
+# frequency of response variable
+cbind( Freq=table(left),
+       Cumul=cumsum(table(left)),
+       relative=round((prop.table(table(left))*100),2))
+
+# pie chart of response variable
+slices <- c(76, 24)
+lbls <- c("0 - still working (76%)", "1-left (24%)")
+pie(slices, labels = lbls, main="Pie chart of response variable",
+  col=c("green", "red"))
+
+
+# frequency of work accident
+cbind( Freq=table(Work_accident),
+       Cumul=cumsum(table(Work_accident)),
+       relative=round((prop.table(table(Work_accident))*100),2))
+
+
+# frequency of promotion_last_5years
+cbind( Freq=table(promotion_last_5years),
+       Cumul=cumsum(table(promotion_last_5years)),
+       relative=round((prop.table(table(promotion_last_5years))*100),2))
+
+# analyzing variable sales
+vec_sales <- as.vector(sales)
+unique(vec_sales)
+vec_sales <- factor(vec_sales)
+qplot(vec_sales, xlab="department", ylab="Amount") + ggtitle("Distribution of department")
+
+# analyzing variable salary
+vec_salary <- as.vector(salary)
+unique(vec_salary)
+vec_salary <- factor(vec_salary)
+qplot(vec_salary, xlab="salary", ylab="Amount") + ggtitle("Distribution of salary")
+
+# analyze sastifaction level
+hist(satisfaction_level, freq=F)
+lines(density(satisfaction_level))
+
+# last evaluation
+hist(last_evaluation, freq=F)
+lines(density(last_evaluation))
+
+# number of projects
+hist(number_project, ylim = c(0,0.8), freq=F)
+lines(density(number_project))
+
+# average_montly_hours
+hist(average_montly_hours, freq=F, main="Histogram of average monthly hours")
+lines(density(average_montly_hours))
+
+# time spend inside company
+hist(time_spend_company,  ylim = c(0,1.2), freq=F)
+lines(density(time_spend_company))
+
+
+### Calculate correlation ###
+library(corrplot)
+par(mar=c(4,3,2,2))
+par(oma=c(1,1,2,2))
+corrplot(cor(hr[,c(1,2,3,4,5,6,7,8)]),type="lower", tl.col="black",method="ellipse")
+
+# correlation
+cor(hr[sapply(hr, is.numeric)])
+
+```
+
+Satisfaction level has the highest correlation, that has a negative relationship with left (response variable).
+
+```{r}
+### Bivariate analysis ###
+
+# left vs work_accident
+t <- table(hr$left, hr$Work_accident)
+barplot(prop.table(t,2), legend=paste(unique(hr$left), "left"),
+        ylab="Cumulative Probability", xlab="work accident")
+
+# or
+CrossTable(hr$left, hr$Work_accident, prop.r=TRUE, prop.c=FALSE,
+                                      prop.t=TRUE, prop.chisq=FALSE)
+
+aggregate(left ~ Work_accident, FUN=mean)
+
+# left vs promotion_last_5years
+CrossTable(hr$left, hr$promotion_last_5years, prop.r=TRUE, prop.c=FALSE,
+           prop.t=TRUE, prop.chisq=FALSE)
+
+aggregate(left ~ promotion_last_5years, FUN=mean)
+```
+
+People that didn't have a promotion in the last 5 years left more than those who have it.
+
+```{r}
+# left vs sales
+aggregate(left ~ sales, FUN=mean)
+```
+
+People from Management have the lowest average left and HR have the highest average.
+
+```{r}
+# left vs salary
+aggregate(left ~ salary, FUN=mean)
+```
+
+Low salary have higher average left compared to other categories.
+
+
+\hspace*{2cm}
+
+**3) Data transformation**
+
+Categorize sales variable accordingly to left average rate.
+
+```{r}
+group1 <- c('hr')
+group2 <- c('accounting','sales','support','technical')
+group3 <- c('marketing', 'IT','product_mng')
+group4 <- c('management','RandD')
+
+hr$new_sales <- ifelse(sales %in% group1, 1,
+                       ifelse(sales %in% group2, 2,
+                              ifelse(sales %in% group3, 3,4)))
+
+
+aggregate(hr$left ~ hr$new_sales, FUN=mean)
+```
+
+\hspace*{2cm}
+
+**4) Divide between train and test set**
+
+Divide 70% to train and 30% to test
+```{r}
+set.seed(4)
+hr_train <- sample(nrow(hr), floor(nrow(hr)*0.7))
+train <- hr[hr_train,]
+test <- hr[-hr_train,]
+```
+
+\hspace*{2cm}
+
+**5) Logistic regression**
+
+Test 1: all variables
+```{r}
+names(hr)
+model <- glm(formula = (left) ~  satisfaction_level
+                              + last_evaluation
+                              + number_project
+                              + average_montly_hours
+                              + time_spend_company
+                              + Work_accident
+                              + promotion_last_5years
+                              + sales
+                              + salary,
+              family=binomial(logit), data=train)
+
+summary(model)
+
+anova(model, test="Chisq")
+```
+
+All the variables are relevant, and the most important ones are satisfaction level, work accident, and salary, in this order.
+
+```{r}
+# test data set #
+library(ROCR)
+p <- predict(model, test, type="response")
+pr <- prediction(p, test$left)
+
+# calculate the true positive rate and false positive rate
+prf <- performance(pr, measure = "tpr", x.measure = "fpr")
+plot(prf)
+
+
+# Area Under the Curve
+auc <- performance(pr, measure = "auc")
+auc <- auc@y.values[[1]]
+auc
+
+# KS is the maximum difference between the cumulative true positive and cumulative false positive rate.
+max(attr(prf,'y.values')[[1]]-attr(prf,'x.values')[[1]])
+```
+
+Test 2: put the categorized variable new_sales
+
+```{r}
+model2 <- glm(formula = (left) ~  satisfaction_level
+             + last_evaluation
+             + number_project
+             + average_montly_hours
+             + time_spend_company
+             + Work_accident
+             + promotion_last_5years
+             + new_sales
+             + salary,
+             family=binomial(logit), data=train)
+
+summary(model2)
+
+anova(model2, test="Chisq")
+
+
+# test data set #
+library(ROCR)
+p2 <- predict(model2, test, type="response")
+pr2 <- prediction(p2, test$left)
+prf2 <- performance(pr2, measure = "tpr", x.measure = "fpr")
+plot(prf2)
+
+
+# Area Under the Curve
+auc2 <- performance(pr2, measure = "auc")
+auc2 <- auc2@y.values[[1]]
+auc2
+
+# KS
+max(attr(prf2,'y.values')[[1]]-attr(prf2,'x.values')[[1]])
+```
+
+Slightly improvement using the categorized sales variable.
+
+\hspace*{2cm}
+
+**6) Decision tree**
+
+Let's use the best variables combination got on logistic regression
+```{r}
+tree1 <- rpart(formula = left ~  satisfaction_level
+                  + last_evaluation
+                  + number_project
+                  + average_montly_hours
+                  + time_spend_company
+                  + Work_accident
+                  + promotion_last_5years
+                  + new_sales
+                  + salary,
+                    data = train,
+                    method = "class")
+
+# plot tree
+plot(tree1, uniform=TRUE, main="Classification Tree")
+text(tree1, use.n=TRUE, all=TRUE, cex=.8)
+
+# fancy plot tree using package rpart.plot is not possible on R Markdown
+# fancyRpartPlot(tree1)
+```
+
+
+To validate the model I used the printcp and plotcp functions. Where ‘CP’ stands for Complexity Parameter of the tree. Also it's possibel to prune the tree to avoid any overfitting of the data.
+
+```{r}
+# Validation
+# get the optimal prunings based on the cp value.
+printcp(tree1)
+
+# The value of cp should be least, so that the cross-validated error rate is minimum.
+tree1$cptable[which.min(tree1$cptable[,"xerror"]),"CP"]
+
+plotcp(tree1)
+
+# This graph shows it's not necessary prune the tree
+
+# confusion matrix (training data)
+conf_matrix_tree <- table(train$left, predict(tree1, type="class"))
+rownames(conf_matrix_tree) <- paste("Actual", rownames(conf_matrix_tree), sep = ":")
+colnames(conf_matrix_tree) <- paste("Pred", colnames(conf_matrix_tree), sep = ":")
+print(conf_matrix_tree)
+
+# On test set
+test_tree = predict(tree1, test, type = "prob")
+
+#Storing Model Performance Scores
+pred_tree <-prediction(test_tree[,2], test$left)
+
+# Calculating Area under Curve
+perf_tree <- performance(pred_tree,"auc")
+perf_tree
+
+# Calculating True Positive and False Positive Rate
+perf_tree <- performance(pred_tree, "tpr", "fpr")
+
+# Plot the ROC curve
+plot(perf_tree,  lwd = 1.5)
+
+#Calculating KS statistics
+ks1.tree <- max(attr(perf_tree, "y.values")[[1]] - (attr(perf_tree, "x.values")[[1]]))
+ks1.tree
+```
+
+\hspace*{2cm}
+
+**7) Conclusions**
+
+* What are the most important aspects that are decisive to employees leave their jobs?
+In the logistic regression I found satisfaction level, work accident, and salary as the most relevant aspects.
+The decision tree, the most important are satisfaction level, time spend on company and number of project.
+
+
+* What is more accurate to predict these aspects: logistic regression or decision tree?
+For this data set, decision tree got a better performance on test data set. We can observe this by the ROC curves below and comparing the K.S, for the decision tree is 0.90 and the logistic regression is 0.51.
+
+
+```{r}
+
+mypar(1,2)
+plot(prf2)
+title("ROC curve logistic regression")
+
+plot(perf_tree,  lwd = 1.5)
+title("ROC curve decision tree")
+```
+
+
+
+
